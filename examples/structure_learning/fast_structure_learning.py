@@ -479,7 +479,7 @@ def spm_mb_structure_learning(observations, locations_matrix, dt: int = 2, max_l
 
             for g in range(len(G)):
                 # initial state (even indices)
-                observations[n + 1] = observations[n+1].at[2 * g, t].set(qs_hist[g][0,0,:])
+                observations[n + 1] = observations[n+1].at[2 * g, t, :qs[g].shape[-1]].set(qs_hist[g][0,0,:])
                 # path (odd indices)
                 observations[n + 1] = observations[n+1].at[2 * g + 1, t , action[g]].set(1.0)
 
@@ -493,42 +493,6 @@ def spm_mb_structure_learning(observations, locations_matrix, dt: int = 2, max_l
 
         if len(G) == 1:
             break
-
-        #     pdp   = MDP{n};
-        #     pdp.T = numel(T{t}); 
-        #     for j = 1:pdp.T
-        #         pdp.O(:,j) = O{n}(:,T{t}(j));
-        #     end
-        #     pdp   = spm_MDP_VB_XXX(pdp);
-
-        #     % initial states and paths
-        #     %------------------------------------------------------------------
-        #     ig    = 1;
-        #     L     = zeros(1,size(L,2));
-        #     for g = 1:numel(G)
-
-        #         % states, paths and average location for this goup
-        #         %--------------------------------------------------------------
-        #         qs = pdp.X{g}(:,1);
-        #         qu = pdp.P{g}(:,end);
-        #         ml = mean(MDP{n}.LG(G{g},:));
-
-        #         % states (odd)
-        #         %--------------------------------------------------------------
-        #         MDP{n}.id.D{g} = ig;
-        #         O{n + 1}{ig,t} = qs;
-        #         L(ig,:)        = ml;
-        #         ig = ig + 1;
-
-        #         % paths (even)
-        #         %--------------------------------------------------------------
-        #         MDP{n}.id.E{g} = ig;
-        #         O{n + 1}{ig,t} = qu;
-        #         L(ig,:)        = ml;
-        #         ig = ig + 1;
-
-        #     end
-        # end
 
     return agents, RG, LG
 
