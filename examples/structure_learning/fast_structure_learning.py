@@ -113,19 +113,19 @@ def patch_svd(image_data: Array, patch_indices: List[Array], patch_centroids, pa
         # single value decomposition for this 'pixel group''
         Y = image_data.reshape(n_frames, channels_x_duplicates*width*height)[:,patch_g_indices] * patch_weights[g_i]
 
-        new_image = jnp.zeros(channels_x_duplicates*width*height)
-        new_image = new_image.at[patch_g_indices].set(patch_weights[g_i])
-        new_image = new_image.reshape(channels_x_duplicates, width, height)
-        plt.imshow(new_image[0])
-        plt.title(f'Patch {g_i}')
-        plt.show()
+        # new_image = jnp.zeros(channels_x_duplicates*width*height)
+        # new_image = new_image.at[patch_g_indices].set(patch_weights[g_i])
+        # new_image = new_image.reshape(channels_x_duplicates, width, height)
+        # plt.imshow(new_image[0])
+        # plt.title(f'Patch {g_i}')
+        # plt.show()
 
         # (n_frames x n_frames), (n_frames,), (n_frames x n_frames)
         U, svals, V = jnp.linalg.svd(Y@Y.T, full_matrices=True)
 
-        plt.imshow(Y@Y.T)
-        plt.title(f'Patch {g_i}')
-        plt.show()
+        # plt.imshow(Y@Y.T)
+        # plt.title(f'Patch {g_i}')
+        # plt.show()
         
         normalized_svals = svals * (len(svals)/svals.sum())
         topK_svals = (normalized_svals > sv_thr) # equivalent of `j` in spm_svd.m
@@ -415,19 +415,18 @@ def spm_mb_structure_learning(observations, locations_matrix, dt: int = 2, max_l
         G = spm_space(locations_matrix)
         T = spm_time(observations[n].shape[1], dt)
 
-        A, B = [], []
-        A_dependencies = []
+        A = [None] * observations[n].shape[0]
+        B = []
+        A_dependencies = [None] * observations[n].shape[0]
         for g in range(len(G)):
             a, b = spm_structure_fast(observations[n][G[g]], dt)
-            A += a
-            B += b
 
-            # dependencies
-            A_deps_for_patch_g = [g] * len(G[g])
-            A_dependencies += A_deps_for_patch_g
-  
-        A_dependencies = [[a_dep] for a_dep in A_dependencies]
-        
+            for m_relative, m_idx in enumerate(G[g]):
+                A[m_idx] = a[m_relative]
+                A_dependencies[m_idx] = [g]
+
+            B += b
+          
         RG.append(G)
         LG.append(locations_matrix)
 
@@ -474,21 +473,14 @@ def spm_mb_structure_learning(observations, locations_matrix, dt: int = 2, max_l
                 print(f'Maximum probability state about factor 0 at time {sub_horizon[j]}: {jnp.argmax(qs[0][0,-1,:])}')
 
 
-            ### Decisions to be made next -- how to deal with the 'even-odd' states and paths storage that happens below
-            ### OPTIONS:
-            # 1. OBJECT ARRAY: reshape observations into a numpy array of dtype 'object' of shape (num_modalities, timesteps) where
-            # each 'sub-arrray' (observations[m, t]) is a variably-shaped vector
-            # 2. Tim's idea: concatenate the state and the action into one big vector, that way O[n] is still of 
-            # shape (num_modalities, timesteps, state_dim * path_dim)
-            # 3. Equalize their lengths by padding with zeros. So if states has 16 dims and paths has 1 dim, then you just
+            ### How to deal with the 'even-odd' states and paths storage to follow:
+            # Equalize their lengths by padding with zeros. For example, if hidden states are 16-dimensional and paths are 2 dimensional, then you just
             # make paths have 16 dims as well (pad with zeros). Then you'll still have (num_modalities, timesteps, 16) for O[n]
-            #
-            # for now, we'll go with option 3
 
             for g in range(len(G)):
-                # initial state
+                # initial state (even indices)
                 observations[n + 1] = observations[n+1].at[2 * g, t].set(qs_hist[g][0,0,:])
-                # path
+                # path (odd indices)
                 observations[n + 1] = observations[n+1].at[2 * g + 1, t , action[g]].set(1.0)
 
         # coarse grain locations
