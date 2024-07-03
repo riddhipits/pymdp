@@ -30,9 +30,12 @@ def read_frames_from_mp4(file_path: str, num_frames: int = 32, size: tuple[int] 
     video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
+    
+    
     x_center = video_width // 2
     y_center = video_height // 2
+    # x_start = max(0, x_center - width // 2)
+    # y_start = max(0, y_center - height // 2)
     x_start = max(0, x_center - width)
     y_start = max(0, y_center - height)
 
@@ -46,7 +49,8 @@ def read_frames_from_mp4(file_path: str, num_frames: int = 32, size: tuple[int] 
         ret, frame = cap.read()
         if not ret:
             break
-
+        
+        # cropped_frame = frame[y_start:y_start+height, x_start:x_start+width]
         cropped_frame = frame[y_start:y_start+2*height, x_start:x_start+2*width]
         resized_frame = cv2.resize(cropped_frame, size)
         frames.append(resized_frame)
@@ -73,7 +77,7 @@ def map_rbg_2_discrete(image_data: Array, tile_diameter=32, n_bins=9, max_n_mode
         Threshold for temporal resampling (`R` in the original code)
     """
     # ensure number of bins is odd (for symmetry)
-    n_bins = 2 * jnp.trunc(n_bins/2) + 1
+    n_bins = int(2 * jnp.trunc(n_bins/2) + 1)
 
     n_frames, width, height, n_channels = image_data.shape
     T = int(t_resampling * jnp.trunc(n_frames/t_resampling)) # length of time partition
@@ -89,7 +93,7 @@ def map_rbg_2_discrete(image_data: Array, tile_diameter=32, n_bins=9, max_n_mode
 
     patch_indices, patch_centroids, patch_weights = spm_tile(width=shape_no_time[1], height=shape_no_time[2], n_copies=shape_no_time[0], tile_diameter=tile_diameter)
 
-    return patch_svd(image_data, patch_indices, patch_centroids, patch_weights, sv_thr), patch_indices
+    return patch_svd(image_data, patch_indices, patch_centroids, patch_weights, sv_thr=sv_thr, max_n_modes=max_n_modes, n_bins=n_bins), patch_indices
     
 def patch_svd(image_data: Array, patch_indices: List[Array], patch_centroids, patch_weights: List[Array], sv_thr: float = 1e-6, max_n_modes: int = 32, n_bins: int=9):
     """
@@ -108,9 +112,20 @@ def patch_svd(image_data: Array, patch_indices: List[Array], patch_centroids, pa
 
         # single value decomposition for this 'pixel group''
         Y = image_data.reshape(n_frames, channels_x_duplicates*width*height)[:,patch_g_indices] * patch_weights[g_i]
-        
+
+        new_image = jnp.zeros(channels_x_duplicates*width*height)
+        new_image = new_image.at[patch_g_indices].set(patch_weights[g_i])
+        new_image = new_image.reshape(channels_x_duplicates, width, height)
+        plt.imshow(new_image[0])
+        plt.title(f'Patch {g_i}')
+        plt.show()
+
         # (n_frames x n_frames), (n_frames,), (n_frames x n_frames)
         U, svals, V = jnp.linalg.svd(Y@Y.T, full_matrices=True)
+
+        plt.imshow(Y@Y.T)
+        plt.title(f'Patch {g_i}')
+        plt.show()
         
         normalized_svals = svals * (len(svals)/svals.sum())
         topK_svals = (normalized_svals > sv_thr) # equivalent of `j` in spm_svd.m
@@ -238,8 +253,8 @@ def spm_tile(width: int, height: int, n_copies: int, tile_diameter: int=32):
             pos = jnp.array([x[i], y[j]])
             distance_evals = vmap(lambda x: distance(x, pos))(pixel_indices)
 
-            ij = jnp.argwhere(distance_evals < 2 * tile_diameter).squeeze()
-            h[i][j] = jnp.exp(-distance_evals / (2 * (tile_diameter / 2)**2))
+            ij = jnp.argwhere(distance_evals < (2 * tile_diameter)).squeeze()
+            h[i][j] = jnp.exp(-jnp.square(distance_evals) / (2 * (tile_diameter / 2)**2))
             g[i][j] = ij
 
     G = flatten(g)
@@ -538,7 +553,7 @@ if __name__ == "__main__":
     # Group indices is num_modalities
     # sv_discrete_axis num_modalities x num_discrete_bins
     # V_per_patch num_patches, num_pixels_per_patch x 11?
-    (observations, locations_matrix, group_indices, sv_discrete_axis, V_per_patch), patch_indices = map_rbg_2_discrete(frames, tile_diameter=32, n_bins=16)
+    (observations, locations_matrix, group_indices, sv_discrete_axis, V_per_patch), patch_indices = map_rbg_2_discrete(frames, tile_diameter=32, n_bins=9, sv_thr=(1./5.))
     
     # convert list of list of observation one-hots into an array of size (num_modalities, timesteps, num_obs)
     observations = jnp.asarray(observations)
@@ -552,38 +567,38 @@ if __name__ == "__main__":
     plt.show()
 
 
-    # for A_m in A[0]:
-    #     print(A_m[0].shape)
-    #     print(A_m)
-    # for B_m in B[0]:
-    #     print(B_m[0].shape)
-    #     print(B_m)
+    for A_m in A[0]:
+        print(A_m[0].shape)
+        print(A_m)
+    for B_m in B[0]:
+        print(B_m[0].shape)
+        print(B_m)
 
-    # G = spm_space(locations_matrix)
-    # print(G)
+    G = spm_space(locations_matrix)
+    print(G)
 
     
-    # ims = []
+    ims = []
 
-    # # Map the discrete outcomes back to RGB    
-    # observations = jnp.array(observations)
-    # video = jnp.zeros(frames.shape)
-    # for t in range(observations.shape[1]):
-    #     img = map_discrete_2_rgb(observations[:, t, :], locations_matrix, group_indices, sv_discrete_axis, V_per_patch, patch_indices, frames.shape[-3:])
+    # Map the discrete outcomes back to RGB    
+    observations = jnp.array(observations)
+    video = jnp.zeros(frames.shape)
+    for t in range(observations.shape[1]):
+        img = map_discrete_2_rgb(observations[:, t, :], locations_matrix, group_indices, sv_discrete_axis, V_per_patch, patch_indices, frames.shape[-3:])
 
-    #     # this reconstructs 2 frames
-    #     for i in range(2):
-    #         im = img[i, ...]
-    #         # transform back to RGB
-    #         im = jnp.transpose(im, (1, 2, 0))
-    #         im /= 255
-    #         im = jnp.clip(im, 0, 1)
-    #         im = (255*im).astype(onp.uint8)
+        # this reconstructs 2 frames
+        for i in range(2):
+            im = img[i, ...]
+            # transform back to RGB
+            im = jnp.transpose(im, (1, 2, 0))
+            im /= 255
+            im = jnp.clip(im, 0, 1)
+            im = (255*im).astype(onp.uint8)
 
-    #         gt = frames[t*2 + i]
-    #         ims.append(onp.hstack([im, gt]) )
+            gt = frames[t*2 + i]
+            ims.append(onp.hstack([im, gt]) )
 
-    # imageio.mimsave('reconstruction.gif', ims)
+    imageio.mimsave('reconstruction.gif', ims)
 
 
 
