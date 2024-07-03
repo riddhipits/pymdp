@@ -58,7 +58,7 @@ def read_frames_from_mp4(file_path: str, num_frames: int = 32, size: tuple[int] 
     cap.release()
     return jnp.array(frames)
 
-def map_rbg_2_discrete(image_data: Array, tile_diameter=32, n_bins=9, max_n_modes=32, sv_thr=(1./32.), t_resampling=2):
+def map_rgb_2_discrete(image_data: Array, tile_diameter=32, n_bins=9, max_n_modes=32, sv_thr=(1./32.), t_resampling=2):
     """ Re-implementation of `spm_rgb2O.m` in Python
     Maps an RGB image format to discrete outcomes
 
@@ -553,7 +553,7 @@ if __name__ == "__main__":
     # Group indices is num_modalities
     # sv_discrete_axis num_modalities x num_discrete_bins
     # V_per_patch num_patches, num_pixels_per_patch x 11?
-    (observations, locations_matrix, group_indices, sv_discrete_axis, V_per_patch), patch_indices = map_rbg_2_discrete(frames, tile_diameter=32, n_bins=9, sv_thr=(1./5.))
+    (observations, locations_matrix, group_indices, sv_discrete_axis, V_per_patch), patch_indices = map_rgb_2_discrete(frames, tile_diameter=32, n_bins=9, sv_thr=(1./5.))
     
     # convert list of list of observation one-hots into an array of size (num_modalities, timesteps, num_obs)
     observations = jnp.asarray(observations)
