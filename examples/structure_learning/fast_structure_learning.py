@@ -11,7 +11,8 @@ import matplotlib.pyplot as plt
 import imageio
 
 from pymdp.jax.agent import Agent
-
+from pymdp.jax.control import compute_expected_obs, compute_expected_state
+from functools import partial
 
 from math import prod
 
@@ -495,6 +496,78 @@ def spm_mb_structure_learning(observations, locations_matrix, dt: int = 2, max_l
             break
 
     return agents, RG, LG
+
+
+def predict(agents, D=None, E=None, num_steps=1):
+    n = len(agents) - 1
+
+    beliefs = [None,] * (len(agents))
+    observations = [None,] * (len(agents))
+
+    # add time dimension
+    qs = jtu.tree_map(lambda x : jnp.expand_dims(x, 1), D)
+        
+    # unroll highest level
+    expected_state = partial(compute_expected_state, B_dependencies=agents[n].B_dependencies)
+    
+    for _ in range(num_steps):
+        qs_last = jtu.tree_map(lambda x: x[:,-1,...], qs)
+        # this computation of the predictive prior is correct only for fully factorised Bs.
+        pred = vmap(expected_state)(qs_last, agents[n].B, E)
+        # pred, qs  = agents[n].infer_empirical_prior(E, qs)
+        # stack in time dimension
+        qs = jtu.tree_map(
+            lambda x, y: jnp.concatenate([x, jnp.expand_dims(y, 1)], 1),
+            qs,
+            pred,
+        )
+
+    qs_stacked = jtu.tree_map(lambda x: jnp.reshape(x, (x.shape[0]*x.shape[1], x.shape[2])), qs)
+    beliefs[n] = qs_stacked
+
+    # generate outcomes of highest level, vmap over time
+    expected_obs = partial(compute_expected_obs, A_dependencies=agents[n].A_dependencies)
+    A_stacked = jtu.tree_map(lambda x: jnp.broadcast_to(x, (qs_stacked[0].shape[0], x.shape[1], x.shape[2])), agents[n].A)
+    qo = vmap(expected_obs)(qs_stacked, A_stacked)
+
+    observations[n] = qo
+
+    while n > 0:
+        qo = observations[n]
+
+        n -= 1
+        agent = agents[n]
+        
+        # split this in initial state "D" and path "E"
+        DD = qo[::2]
+        for i in range(len(agent.B)):
+            DD[i] = DD[i][:, :agent.B[i].shape[1]]
+        EE = jtu.tree_map(lambda x: jnp.argmax(x, axis=1), qo[1::2])
+
+        # unroll path and get beliefs qs at level n
+        # TODO repeat if dt > 2
+        expected_state = partial(compute_expected_state, B_dependencies=agents[n].B_dependencies)
+        B_stacked = jtu.tree_map(lambda x: jnp.broadcast_to(x, (DD[0].shape[0], x.shape[1], x.shape[2], x.shape[3])), agents[n].B)
+        pred = vmap(expected_state)(DD, B_stacked, EE)
+
+        # stack in time dimension
+        qs = jtu.tree_map(
+            lambda x, y: jnp.concatenate([jnp.expand_dims(x, 1), jnp.expand_dims(y, 1)], 1),
+            DD,
+            pred,
+        )
+
+        qs_stacked = jtu.tree_map(lambda x: jnp.reshape(x, (x.shape[0]*x.shape[1], x.shape[2])), qs)
+        beliefs[n] = qs_stacked
+
+        # now generate outcomes of level n, vmap over time
+        expected_obs = partial(compute_expected_obs, A_dependencies=agents[n].A_dependencies)
+        A_stacked = jtu.tree_map(lambda x: jnp.broadcast_to(x, (qs_stacked[0].shape[0], x.shape[1], x.shape[2])), agents[n].A)
+        qo = vmap(expected_obs)(qs_stacked, A_stacked)
+
+        observations[n] = qo
+
+    return observations, beliefs
 
 if __name__ == "__main__":
     
