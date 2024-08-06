@@ -12,6 +12,8 @@ import imageio
 
 from pymdp.jax.agent import Agent
 from pymdp.jax.control import compute_expected_obs, compute_expected_state
+from pymdp.jax.maths import factor_dot
+
 from functools import partial
 
 from math import prod
@@ -575,11 +577,18 @@ def spm_mb_structure_learning(observations, locations_matrix, dt: int = 2, max_l
             # Equalize their lengths by padding with zeros. For example, if hidden states are 16-dimensional and paths are 2 dimensional, then you just
             # make paths have 16 dims as well (pad with zeros). Then you'll still have (num_modalities, timesteps, 16) for O[n]
 
-            for g in range(len(G)):
+            # create function that marginalizes out the q(s_{t}) and q(s_{t+1}) from p(s_{t+1} | s_t, u_t) to get q(u_t)
+            action_marginal_fn = lambda b, qs: factor_dot(b, qs, keep_dims=(2,))
+
+            for g in range(len(G)): 
+                # infer q(paths) using the consecutive timesteps of qs_hist[g] (namely qs_hist[g][0, 0, :] and qs_hist[g][0, 1, :])
+                q_u = vmap(action_marginal_fn)(pdp.B[g], [qs_hist[g][:, 0, :], qs_hist[g][:, 1, :]])
+
                 # initial state (even indices)
                 observations[n + 1] = observations[n + 1].at[2 * g, t, : qs[g].shape[-1]].set(qs_hist[g][0, 0, :])
                 # path (odd indices)
-                observations[n + 1] = observations[n + 1].at[2 * g + 1, t, action[g]].set(1.0)
+                # observations[n + 1] = observations[n + 1].at[2 * g + 1, t, action[g]].set(1.0)
+                observations[n + 1] = observations[n + 1].at[2 * g + 1, t, :q_u.shape[-1]].set(q_u[0])
 
         # coarse grain locations
         coarse_locations = []
@@ -594,6 +603,12 @@ def spm_mb_structure_learning(observations, locations_matrix, dt: int = 2, max_l
 
     return agents, RG, LG
 
+def infer(agents, observations, *args, **kwargs):
+    """
+    TO DO
+    """
+    
+    pass
 
 def predict(agents, D=None, E=None, num_steps=1):
     n = len(agents) - 1
@@ -605,13 +620,15 @@ def predict(agents, D=None, E=None, num_steps=1):
         None,
     ] * (len(agents))
 
-    # add time dimension
+    # add time dimension, so qs[f] has shape (batch_dim, 1, num_states)
     qs = jtu.tree_map(lambda x: jnp.expand_dims(x, 1), D)
 
     # unroll highest level
     expected_state = partial(compute_expected_state, B_dependencies=agents[n].B_dependencies)
 
+    
     for _ in range(num_steps):
+        # extract the last timestep, such tthat qs_last[f] has shape (batch_dim, num_states)
         qs_last = jtu.tree_map(lambda x: x[:, -1, ...], qs)
         # this computation of the predictive prior is correct only for fully factorised Bs.
         pred = vmap(expected_state)(qs_last, agents[n].B, E)
@@ -622,6 +639,7 @@ def predict(agents, D=None, E=None, num_steps=1):
             qs,
             pred,
         )
+    # qs[f] will have shape (batch_dim, num_steps+1, num_states)
 
     qs_stacked = jtu.tree_map(lambda x: jnp.reshape(x, (x.shape[0] * x.shape[1], x.shape[2])), qs)
     beliefs[n] = qs_stacked
@@ -675,7 +693,6 @@ def predict(agents, D=None, E=None, num_steps=1):
         observations[n] = qo
 
     return observations, beliefs
-
 
 if __name__ == "__main__":
 
