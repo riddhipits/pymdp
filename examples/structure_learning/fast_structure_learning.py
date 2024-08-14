@@ -13,6 +13,7 @@ import imageio
 from pymdp.jax.agent import Agent
 from pymdp.jax.control import compute_expected_obs, compute_expected_state
 from pymdp.jax.maths import factor_dot
+from pymdp.jax.algos import run_factorized_fpi
 
 from functools import partial
 
@@ -580,7 +581,7 @@ def spm_mb_structure_learning(observations, locations_matrix, dt: int = 2, max_l
             # create function that marginalizes out the q(s_{t}) and q(s_{t+1}) from p(s_{t+1} | s_t, u_t) to get q(u_t)
             action_marginal_fn = lambda b, qs: factor_dot(b, qs, keep_dims=(2,))
 
-            for g in range(len(G)): 
+            for g in range(len(G)):
                 # infer q(paths) using the consecutive timesteps of qs_hist[g] (namely qs_hist[g][0, 0, :] and qs_hist[g][0, 1, :])
                 q_u = vmap(action_marginal_fn)(pdp.B[g], [qs_hist[g][:, 0, :], qs_hist[g][:, 1, :]])
 
@@ -588,7 +589,7 @@ def spm_mb_structure_learning(observations, locations_matrix, dt: int = 2, max_l
                 observations[n + 1] = observations[n + 1].at[2 * g, t, : qs[g].shape[-1]].set(qs_hist[g][0, 0, :])
                 # path (odd indices)
                 # observations[n + 1] = observations[n + 1].at[2 * g + 1, t, action[g]].set(1.0)
-                observations[n + 1] = observations[n + 1].at[2 * g + 1, t, :q_u.shape[-1]].set(q_u[0])
+                observations[n + 1] = observations[n + 1].at[2 * g + 1, t, : q_u.shape[-1]].set(q_u[0])
 
         # coarse grain locations
         coarse_locations = []
@@ -603,14 +604,88 @@ def spm_mb_structure_learning(observations, locations_matrix, dt: int = 2, max_l
 
     return agents, RG, LG
 
-def infer(agents, observations, *args, **kwargs):
+
+def infer(agents, observations, priors=None):
     """
-    TO DO
+    Infer the top level state given the observations and priors.
+    Some observations can be masked out with uniform vectors if not yet fully observed.
+    When priors is None, we use the (uniform) priors in the agent's D tensors.
+
+    Args:
+        agents (list): list of n agents, n the number of levels in the hieararchy
+        observations (array): (num_modalities, n**T, num_observation_bins): observations of the lowest level
+        priors (list): list of n priors, n the number of levels in the hierarchy
+
+    Returns:
+        Inferred top level state
     """
-    
-    pass
+    if priors is None:
+        # TODO broadcasting priors based on the number of expected timesteps required for inferring 1 top level state
+        # currently assuming T=2
+        priors = [
+            jnp.broadcast_to(
+                jnp.asarray(agents[n].D), (len(agents[n].D), 2 ** (abs(n - len(agents) + 1)), agents[n].D[0].shape[-1])
+            )
+            for n in range(len(agents))
+        ]
+
+    for n in range(len(agents)):
+        # infer states for each observation
+
+        # convert observations array to a list or arrays (modalities), and make time the batch dimension to vmap over
+        # TODO not considering actual batch dimension here
+        o = [observations[i, :, :] for i in range(observations.shape[0])]
+
+        priors_n = [priors[n][i, :, :] for i in range(priors[n].shape[0])]
+
+        # doesn't auto-broadcast to batch, call inference method vmapped ourselves
+        # qs = agents[n].infer_states(o, past_actions=None, empirical_prior=priors, qs_hist=None)
+        infer = partial(run_factorized_fpi, A_dependencies=agents[n].A_dependencies, num_iter=agents[n].num_iter)
+        qs = vmap(infer, in_axes=(None, 0, 0))(jtu.tree_map(lambda x: x[0], agents[n].A), o, priors_n)
+
+        if n == len(agents) - 1:
+            # reached the top level, no more paths to infer?, return this? (and only this?)
+            return qs
+
+        # now infer paths for each subsequence of T (= 2)
+        q0 = jtu.tree_map(lambda x: x[::2, :], qs)
+        q1 = jtu.tree_map(lambda x: x[1::2, :], qs)
+
+        D = q0
+        E = []
+        # TODO make this a method instead of this loop?
+        action_marginal_fn = lambda b, qs: factor_dot(b, qs, keep_dims=(2,))
+        for g in range(len(agents[n].B)):
+            E.append(vmap(action_marginal_fn, in_axes=(None, 0))(agents[n].B[g][0], [q0[g], q1[g]]))
+
+        ndim = max(D[0].shape[-1], E[0].shape[-1])
+
+        # pad D and E to be same trailing dim
+        D = jtu.tree_map(lambda x: jnp.pad(x, ((0, 0), (0, ndim - x.shape[-1]))), D)
+        E = jtu.tree_map(lambda x: jnp.pad(x, ((0, 0), (0, ndim - x.shape[-1]))), E)
+
+        # now interleave init state 0, path 0, start state 1, path 1, etc.
+        interleaved = E + D
+        interleaved[::2] = D
+        interleaved[1::2] = E
+        observations = jnp.asarray(interleaved)
+
 
 def predict(agents, D=None, E=None, num_steps=1):
+    """
+    Infer the top level state given the observations and priors.
+    Some observations can be masked out with uniform vectors if not yet fully observed.
+    When priors is None, we use the (uniform) priors in the agent's D tensors.
+
+    Args:
+        agents (list): list of n agents, n the number of levels in the hieararchy
+        D (list): list of initial state factors at the top level
+        E (list): list of path at the top level
+
+    Returns:
+        Predicted states and observations for all levels in the hierarchy
+    """
+
     n = len(agents) - 1
 
     beliefs = [
@@ -626,7 +701,6 @@ def predict(agents, D=None, E=None, num_steps=1):
     # unroll highest level
     expected_state = partial(compute_expected_state, B_dependencies=agents[n].B_dependencies)
 
-    
     for _ in range(num_steps):
         # extract the last timestep, such tthat qs_last[f] has shape (batch_dim, num_states)
         qs_last = jtu.tree_map(lambda x: x[:, -1, ...], qs)
@@ -692,7 +766,10 @@ def predict(agents, D=None, E=None, num_steps=1):
 
         observations[n] = qo
 
+    observations = [jnp.asarray(o) for o in observations]
+    beliefs = [jnp.asarray(b) for b in beliefs]
     return observations, beliefs
+
 
 if __name__ == "__main__":
 
