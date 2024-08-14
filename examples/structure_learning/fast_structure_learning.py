@@ -280,6 +280,41 @@ def map_discrete_2_rgb(
     return recons_image
 
 
+def map_action_2_discrete(actions, n_bins=9, min_val=-1, max_val=1):
+    """
+    Maps continuous actions to discrete outcomes
+    Args:
+        actions: Array
+            The actions to be mapped to discrete outcomes. Shape (num_frames, num_actions)
+        n_bins: int
+            Number of bins to quantize the actions into
+    """
+
+    action_bins = jnp.linspace(min_val, max_val, n_bins)
+    min_indices = jnp.argmin(jnp.absolute(actions[:, :, jnp.newaxis] - action_bins), axis=-1)
+    one_hots = nn.one_hot(min_indices, n_bins)
+
+    reshaped = one_hots.reshape(-1, one_hots.shape[1] * 2, n_bins)
+    transposed = jnp.transpose(reshaped, (1, 0, 2))
+    return transposed, action_bins
+
+
+def map_discrete_2_action(action_one_hots, action_bins):
+    """
+    Maps discrete outcomes to continuous actions
+    Args:
+        action_one_hots: Array
+            The one-hot encoded actions. Shape (num_frames, num_actions, num_bins)
+        action_bins: Array
+            The bins to quantize the actions into. Shape (num_bins,)
+    """
+
+    transposed = jnp.transpose(action_one_hots, (1, 0, 2))
+    actions = jnp.sum(transposed * action_bins, axis=-1)
+    actions = actions.reshape(-1, actions.shape[1] // 2)
+    return actions
+
+
 def spm_dir_norm(a):
     """
     Normalisation of a (Dirichlet) conditional probability matrix
@@ -493,7 +528,7 @@ def spm_structure_fast(observations, dt=2):
     return a, [b]
 
 
-def spm_mb_structure_learning(observations, locations_matrix, dt: int = 2, max_levels: int = 8):
+def spm_mb_structure_learning(observations, locations_matrix, num_controls=0, dt: int = 2, max_levels: int = 8):
     """
 
     Args:
@@ -513,6 +548,11 @@ def spm_mb_structure_learning(observations, locations_matrix, dt: int = 2, max_l
     observations = [observations]
     for n in range(max_levels):
         G = spm_space(locations_matrix)
+        if n == 0 and num_controls > 0:
+            # prepend action one_hots to first group
+            G = [g + num_controls for g in G]
+            G[0] = jnp.concatenate((jnp.arange(num_controls), G[0]))
+
         T = spm_time(observations[n].shape[1], dt)
 
         A = [None] * observations[n].shape[0]
