@@ -736,6 +736,8 @@ def predict(agents, D=None, E=None, num_steps=1):
     ] * (len(agents))
 
     # add time dimension, so qs[f] has shape (batch_dim, 1, num_states)
+    if D is None:
+        D = agents[n].D
     qs = jtu.tree_map(lambda x: jnp.expand_dims(x, 1), D)
 
     # unroll highest level
