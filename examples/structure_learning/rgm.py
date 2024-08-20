@@ -155,6 +155,9 @@ class RGM:
 
     def reconstruct(self, qs):
         observations, _ = predict(self.agents, qs, None, num_steps=0)
+        return self.discrete_2_rgb_action(observations[0])
+
+    def discrete_2_rgb_action(self, one_hots):
         map_discrete_2_rgb_fn = partial(
             map_discrete_2_rgb,
             locations_matrix=self.locations_matrix,
@@ -165,10 +168,10 @@ class RGM:
             image_shape=self.image_shape,
         )
 
-        action_one_hots = observations[0][: self.num_controls]
+        action_one_hots = one_hots[: self.num_controls]
         actions = map_discrete_2_action(action_one_hots, self.action_bins)
 
-        observation_one_hots = observations[0][self.num_controls :]
+        observation_one_hots = one_hots[self.num_controls :]
         imgs = vmap(map_discrete_2_rgb_fn, in_axes=1, out_axes=0)(observation_one_hots)
         imgs = imgs.reshape((imgs.shape[0] * imgs.shape[1], imgs.shape[-3], imgs.shape[-2], imgs.shape[-1]))
 
@@ -214,12 +217,13 @@ class RGMAgent:
             self.posterior = self.rgm.infer_states(self.observations, priors=self.priors, one_hot_obs=True)
             self.window = []
 
-        # TODO update posterior if we have enough data?
-
-        imgs, actions = self.rgm.reconstruct(self.posterior)
+            # TODO update posterior if we have enough data?
+            imgs, actions = self.rgm.reconstruct(self.posterior)
 
         a = actions[self.t]
         img = imgs[self.t]
+
+        # TODO should we clamp action observations to selected actions?
 
         self.t += 1
 
