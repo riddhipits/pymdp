@@ -110,7 +110,7 @@ class RGM:
         self.image_shape = data["image_shape"]
         self.num_controls = data["num_controls"][0]
 
-    def to_one_hot(self, observations, actions=None):
+    def to_one_hot(self, observations, actions=None, mask_indices=None):
         (
             observation_one_hots,
             self.locations_matrix,
@@ -130,6 +130,12 @@ class RGM:
         else:
             action_one_hots, self.action_bins = map_action_2_discrete(actions, n_bins=self.n_bins)
             self.num_controls = action_one_hots.shape[0]
+
+        mask_val = 1.0 / observation_one_hots.shape[-1]
+        if mask_indices is not None:
+            for idx in range(len(self.group_indices)):
+                if self.group_indices[idx] in mask_indices:
+                    observation_one_hots = observation_one_hots.at[idx, ...].set(mask_val)
 
         # prepend action one_hots to first group
         self.group_indices = [0] * self.num_controls + self.group_indices
@@ -218,7 +224,7 @@ class RGMAgent:
             self.window = []
 
             # TODO update posterior if we have enough data?
-            imgs, actions = self.rgm.reconstruct(self.posterior)
+        imgs, actions = self.rgm.reconstruct(self.posterior)
 
         a = actions[self.t]
         img = imgs[self.t]
