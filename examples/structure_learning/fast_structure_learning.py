@@ -477,7 +477,10 @@ def spm_unique(a):
     # Find unique rows -- this however needs to be changed to mimic the behavior of unique(o_discretized, 'stable')
     _, j = jnp.unique(o_discretized, return_inverse=True, axis=0)
 
-    return j.squeeze(axis=1)
+    # suddenly j no longer has trailing 1 dimension?!
+    if j.shape[-1] == 1:
+        j = j.squeeze(axis=1)
+    return j
 
 
 def spm_structure_fast(observations, dt=2):
@@ -645,6 +648,15 @@ def spm_mb_structure_learning(observations, locations_matrix, num_controls=0, dt
     return agents, RG, LG
 
 
+def pad_to_same_size(arrays: list):
+    """
+    Pad arrays to the same size along the last dimension
+    """
+    max_size = max([a.shape[-1] for a in arrays])
+    padded = [jnp.pad(a, ((0, 0), (0, max_size - a.shape[-1]))) for a in arrays]
+    return padded
+
+
 def infer(agents, observations, priors=None):
     """
     Infer the top level state given the observations and priors.
@@ -662,12 +674,18 @@ def infer(agents, observations, priors=None):
     if priors is None:
         # TODO broadcasting priors based on the number of expected timesteps required for inferring 1 top level state
         # currently assuming T=2
-        priors = [
-            jnp.broadcast_to(
-                jnp.asarray(agents[n].D), (len(agents[n].D), 2 ** (abs(n - len(agents) + 1)), agents[n].D[0].shape[-1])
-            )
-            for n in range(len(agents))
-        ]
+        # priors = [
+        #     jnp.broadcast_to(
+        #         jnp.asarray(agents[n].D), (len(agents[n].D), 2 ** (abs(n - len(agents) + 1)), agents[n].D[0].shape[-1])
+        #     )
+        #     for n in range(len(agents))
+        # ]
+
+        # TODO not every agent has the same number of states, so we need to pad the priors to the same size
+        priors = []
+        for n in range(len(agents)):
+            Ds = jnp.stack(pad_to_same_size(agents[n].D))
+            priors.append(jnp.broadcast_to(Ds, (len(agents[n].D), 2 ** (abs(n - len(agents) + 1)), Ds.shape[-1])))
 
     for n in range(len(agents)):
         # infer states for each observation
@@ -676,7 +694,7 @@ def infer(agents, observations, priors=None):
         # TODO not considering actual batch dimension here
         o = [observations[i, :, :] for i in range(observations.shape[0])]
 
-        priors_n = [priors[n][i, :, :] for i in range(priors[n].shape[0])]
+        priors_n = [priors[n][i, :, : agents[n].D[i].shape[-1]] for i in range(priors[n].shape[0])]
 
         # doesn't auto-broadcast to batch, call inference method vmapped ourselves
         # qs = agents[n].infer_states(o, past_actions=None, empirical_prior=priors, qs_hist=None)
@@ -698,7 +716,7 @@ def infer(agents, observations, priors=None):
         for g in range(len(agents[n].B)):
             E.append(vmap(action_marginal_fn, in_axes=(None, 0))(agents[n].B[g][0], [q0[g], q1[g]]))
 
-        ndim = max(D[0].shape[-1], E[0].shape[-1])
+        ndim = max([d.shape[-1] for d in D] + [e.shape[-1] for e in E])
 
         # pad D and E to be same trailing dim
         D = jtu.tree_map(lambda x: jnp.pad(x, ((0, 0), (0, ndim - x.shape[-1]))), D)
@@ -809,7 +827,7 @@ def predict(agents, D=None, E=None, num_steps=1):
         observations[n] = qo
 
     observations = [jnp.asarray(o) for o in observations]
-    beliefs = [jnp.asarray(b) for b in beliefs]
+    beliefs = [jnp.stack(pad_to_same_size(b)) for b in beliefs]
     return observations, beliefs
 
 
