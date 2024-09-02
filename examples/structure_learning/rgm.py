@@ -3,6 +3,8 @@ import jax.numpy as jnp
 from jax import vmap
 from functools import partial
 from pymdp.jax.agent import Agent
+from equinox import tree_at
+
 from fast_structure_learning import *
 
 
@@ -17,14 +19,22 @@ class RGM:
         self.V_per_patch = None
         self.sv_discrete_axis = None
 
-    def fit(self, observations, actions):
+    def learn_structure(self, observations, actions):
         self.image_shape = jnp.asarray(observations.shape[-3:])
         one_hots = self.to_one_hot(observations, actions)
+        print(one_hots.shape)
         # TODO get the number of timesteps for one_hot observations that yield one top-level qs
         self.observation_shape = jnp.asarray([one_hots.shape[0], 2, one_hots.shape[2]])
         self.agents, RG, LB = spm_mb_structure_learning(
             one_hots, self.locations_matrix, self.num_controls, max_levels=self.max_levels
         )
+
+    def learn_B(self, observations, actions):
+        # TODO this only updates top-level B, should we update all levels?
+        one_hots = self.to_one_hot(observations, actions)
+        qs = infer(self.agents, one_hots)
+        qB, E_qB = learn_transitions(qs, pB=self.agents[-1].B)
+        self.agents[-1] = tree_at(lambda x: (x.B), self.agents[-1], (E_qB))
 
     def save(self, filename):
         # save model fit to .npz file
@@ -211,23 +221,35 @@ class RGMAgent:
     def act(self, obs):
         # add latest observations to a sliding window and infer/predict
         self.window.append(obs["pixels"])
-        if len(self.window) == 2:
+        if len(self.window) % 2 == 0:
             # we got two new images, get one-hots
             stacked = jnp.stack(self.window)
-            obs = self.rgm.to_one_hot(stacked)
+            one_hots = self.rgm.to_one_hot(stacked)
             # TODO set idx = 0 (t = 1) or  idx=1 t = 3
             if self.t == 1:
-                self.observations = self.observations.at[:, :1, :].set(obs)
+                self.observations = self.observations.at[:, :1, :].set(one_hots)
             elif self.t == 3:
-                self.observations = self.observations.at[:, 1:, :].set(obs)
+                self.observations = self.observations.at[:, 1:, :].set(one_hots)
+            print("update given observations")
             self.posterior = self.rgm.infer_states(self.observations, priors=self.priors, one_hot_obs=True)
             self.window = []
 
-            # TODO update posterior if we have enough data?
-        imgs, actions = self.rgm.reconstruct(self.posterior)
+        print(jnp.argmax(self.posterior[0]), self.posterior[0].max())
+
+        # TODO reconstruct from posterior, from argmax or from sample?
+        idx = jnp.argmax(self.posterior[0])
+        qs = jnp.zeros((1, self.posterior[0].shape[-1]))
+        qs = qs.at[0, idx].set(1.0)
+        imgs, actions = self.rgm.reconstruct([qs])
+
+        # imgs, actions = self.rgm.reconstruct(self.posterior)
 
         a = actions[self.t]
+        print(a)
         img = imgs[self.t]
+        diff = img - obs["pixels"]
+        mse = jnp.mean(diff * diff)
+        print(mse)
 
         # TODO should we clamp action observations to selected actions?
 
@@ -242,5 +264,6 @@ class RGMAgent:
             self.posterior = [self.priors[len(self.rgm.agents) - 1][0]]
             self.observations = jnp.ones_like(self.observations) / self.observations.shape[-1]
             self.window = []
+            print("update given prior")
 
-        return a, img
+        return a, img, self.posterior[0].max(), mse

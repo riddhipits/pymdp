@@ -14,6 +14,7 @@ from pymdp.jax.agent import Agent
 from pymdp.jax.control import compute_expected_obs, compute_expected_state
 from pymdp.jax.maths import factor_dot
 from pymdp.jax.algos import run_factorized_fpi
+from pymdp.jax.learning import update_state_transition_dirichlet
 
 from functools import partial
 
@@ -699,6 +700,14 @@ def infer(agents, observations, priors=None):
         # doesn't auto-broadcast to batch, call inference method vmapped ourselves
         # qs = agents[n].infer_states(o, past_actions=None, empirical_prior=priors, qs_hist=None)
         infer = partial(run_factorized_fpi, A_dependencies=agents[n].A_dependencies, num_iter=agents[n].num_iter)
+
+        if priors_n[0].shape[0] != o[0].shape[0]:
+            # longer timesequence of observations is given, need to broadcast priors
+            k = o[0].shape[0] // priors_n[0].shape[0]
+            priors_n = jtu.tree_map(
+                lambda x: jnp.broadcast_to(x, (k, x.shape[0], x.shape[1])).reshape(o[0].shape[0], x.shape[1]), priors_n
+            )
+
         qs = vmap(infer, in_axes=(None, 0, 0))(jtu.tree_map(lambda x: x[0], agents[n].A), o, priors_n)
 
         if n == len(agents) - 1:
@@ -829,6 +838,52 @@ def predict(agents, D=None, E=None, num_steps=1):
     observations = [jnp.asarray(o) for o in observations]
     beliefs = [jnp.stack(pad_to_same_size(b)) for b in beliefs]
     return observations, beliefs
+
+
+def learn_transitions(qs, actions=None, B_dependencies=None, pB=None):
+    """
+    qs: a list of jax.numpy arrays of shape [(n_time, n_states) for f in factors]
+    """
+
+    n_states = qs[0].shape[-1]
+    n_time = qs[0].shape[0] - 1
+    print(f"Fitting for {n_states} states and {n_time} timesteps.")
+
+    if pB is None:
+        pB = [1e-3 * jnp.ones((n_states, n_states, 1)) for _ in range(len(qs))]
+
+    if actions is None:
+        # No actions = the zero action at each timestep
+        actions = jnp.zeros((n_time, len(qs)))
+
+    if B_dependencies is None:
+        B_dependencies = [[i] for i in range(len(qs))]
+
+    # Map the qs's to something that can be used for learning.
+    beliefs = []
+
+    # take all the states but the last one
+    qs_f_prev = jtu.tree_map(lambda x: x[:-1], qs)
+    # take all the states but the first one
+    qs_f = jtu.tree_map(lambda x: x[1:], qs)
+
+    for f in range(len(pB)):
+
+        # Extract factor
+        q_f = jnp.array(qs_f[f].tolist())
+        q_prev_f = [jnp.array(qs_f_prev[fi].tolist()) for fi in B_dependencies[f]]
+        beliefs.append([q_f, *q_prev_f])
+
+    qB, E_qB = update_state_transition_dirichlet(pB, beliefs, actions, num_controls=[b.shape[-1] for b in pB], lr=1)
+
+    norm = lambda x: jnp.divide(
+        jnp.clip(x, a_min=1e-8),
+        jnp.clip(x, a_min=1e-8).sum(axis=1, keepdims=True),
+    )
+
+    E_qB = jtu.tree_map(norm, qB)
+
+    return qB, E_qB
 
 
 if __name__ == "__main__":
